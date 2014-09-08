@@ -13,20 +13,27 @@
 #include "cmd.h"
 #include "err.h"
 
-
-extern uint8_t node_addr;
+extern uint32_t flags;
 
 /**
- * Set node address
+ * Set/get generic mode flags
  * Args: <node-addr>
  */
-int cmd_set_node_addr (int argc, uint8_t **argv) {
+int cmd_flags (int argc, uint8_t **argv) {
 
 	if (argc != 2) {
 		return E_WRONG_ARGC;
 	}
 
-	// Node address
-	node_addr = parse_hex(argv[1]);
+	if (argv[1][0]=='?') {
+		MyUARTSendStringZ(LPC_USART0,"f ");
+		MyUARTPrintHex(LPC_USART0, flags);
+		MyUARTSendCRLF(LPC_USART0);
+		return;
+	}
 
+	// Node address
+	flags  = parse_hex(argv[1]);
+
+	return E_OK;
 }

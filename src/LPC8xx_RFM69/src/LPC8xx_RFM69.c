@@ -22,6 +22,8 @@
 #include "print_util.h"
 #include "rfm69.h"
 #include "cmd.h"
+#include "err.h"
+#include "flags.h"
 
 #define SYSTICK_DELAY		(SystemCoreClock/100)
 volatile uint32_t TimeTick = 0;
@@ -33,8 +35,7 @@ int8_t node_addr = 0x7e;
 uint8_t current_loc[32];
 
 // For master controller: forward all received packets in promiscuous mode
-uint8_t promiscuous_mode = 0;
-
+uint32_t flags = 0;
 
 
 void loopDelay(uint32_t i) {
@@ -62,8 +63,8 @@ void SwitchMatrix_Init()
 }
 #endif
 
-#ifdef LPC810_NOSPI
-void SwitchMatrix_Init()
+#ifdef LPC810
+void SwitchMatrix_NoSpi_Init()
 {
     /* Enable SWM clock */
     LPC_SYSCON->SYSAHBCLKCTRL |= (1<<7);
@@ -92,7 +93,7 @@ void SwitchMatrix_Init()
  * To re-flash will need to access ISP
  * by holding PIO0_? low and cycling power.
  */
-void SwitchMatrix_Init()
+void SwitchMatrix_Spi_Init()
 {
     /* Enable SWM clock */
     LPC_SYSCON->SYSAHBCLKCTRL |= (1<<7);
@@ -130,14 +131,16 @@ void report_error (uint8_t cmd, int32_t code) {
 
 int main(void) {
 
-	SwitchMatrix_Init();
+	SwitchMatrix_NoSpi_Init();
 
 	GPIOInit();
 
 	MyUARTInit(LPC_USART0, UART_BPS);
 
 
+#if !defined (LPC810_NOSPI)
 	spi_init();
+#endif
 
 	// Configure hardware interface to radio module
 	rfm69_init();
@@ -170,8 +173,13 @@ int main(void) {
 	while (1) {
 
 		// Check for received packet
-		if (rfm69_payload_ready()) {
+		if ( (flags&FLAG_RADIO_MODULE_ON) && rfm69_payload_ready()) {
 			frame_len = rfm69_frame_rx(frxbuf,66,&rssi);
+
+			// SPI error
+			if (frame_len>0) {
+
+
 
 			// All fames will have these:
 			// First byte is to_node address
@@ -182,13 +190,16 @@ int main(void) {
 			uint8_t from_addr = frxbuf[1];
 			uint8_t msgType = frxbuf[2];
 
-			if (promiscuous_mode || to_addr == 0xff || to_addr == node_addr) {
+			// 0xff is broadcast
+			if ( (flags&FLAG_PROMISCUOUS_MODE) || to_addr == 0xff || to_addr == node_addr) {
 
 				// This is for us!
 
 				switch (msgType) {
-				// Message requesting position report
-				case 0x23 :
+
+				// Message requesting position report. This will return the string
+				// set by the UART 'L' command verbatim.
+				case 'R' :
 				{
 					MyUARTSendStringZ(LPC_USART0,"Sending loc: ");
 
@@ -237,6 +248,7 @@ int main(void) {
 					payload[2] = 'y';
 					rfm69_frame_tx(payload, 2);
 				}
+				// If none of the above cases match, output packet to UART
 				default: {
 
 					MyUARTSendStringZ(LPC_USART0, "p ");
@@ -262,6 +274,9 @@ int main(void) {
 				MyUARTSendCRLF(LPC_USART0);
 
 			}
+
+
+			} // end frame len valid check
 		}
 
 		if (MyUARTGetBufFlags() & UART_BUF_FLAG_EOL) {
@@ -282,12 +297,21 @@ int main(void) {
 				rxbuf++;
 			}
 
+			// TODO: using an array of functions may be more space efficient than
+			// switch statement.
+
 			switch (*args[0]) {
 
 			// Reset RFM69 with default configuration
 			case 'C' :
 			{
 				rfm69_config();
+				break;
+			}
+
+			// Read set various flags
+			case 'F' : {
+				cmd_flags(argc, args);
 				break;
 			}
 
@@ -305,11 +329,14 @@ int main(void) {
 				break;
 			}
 
+
 			// Promiscuous mode
+			/*
 			case 'P' : {
 				cmd_promiscuous_mode(argc, args);
 				break;
 			}
+			*/
 
 			// Read RFM69 register
 			case 'R' : {
@@ -329,6 +356,29 @@ int main(void) {
 				MyUARTSendStringZ(LPC_USART0,"u ");
 				MyUARTPrintHex(LPC_USART0,get_mcu_serial_number());
 				MyUARTSendCRLF(LPC_USART0);
+				break;
+			}
+
+			case 'S' : {
+				if (args[1][0]=='1') {
+					// Note will disconnect SWD
+					SwitchMatrix_Spi_Init();
+					spi_init();
+/*
+					while (1) {
+						GPIOSetBitValue(0,5,0);
+						GPIOSetBitValue(0,5,1);
+						GPIOSetBitValue(0,4,0);
+						GPIOSetBitValue(0,4,1);
+						GPIOSetBitValue(0,3,0);
+						GPIOSetBitValue(0,3,1);
+						GPIOSetBitValue(0,2,0);
+						GPIOSetBitValue(0,2,1);
+					}
+*/
+				} else {
+					SwitchMatrix_NoSpi_Init();
+				}
 				break;
 			}
 
@@ -359,6 +409,9 @@ int main(void) {
 				int regValue = parse_hex(args[2]);
 				rfm69_register_write(regAddr,regValue);
 				break;
+			}
+			default : {
+				report_error(*args[0], E_INVALID_CMD);
 			}
 
 			}
