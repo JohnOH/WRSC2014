@@ -195,8 +195,8 @@ int main(void) {
 #endif
 
 	// Configure RFM69 registers for this application
-	rfm69_config();
 	loopDelay(200000);
+	rfm69_config();
 
 
 	while (1) {
