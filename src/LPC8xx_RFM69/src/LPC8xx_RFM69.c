@@ -385,6 +385,14 @@ int main(void) {
 				memcpy(current_loc,args[1],strlen(args[1])+1);
 				break;
 			}
+			// NMEA (only interested in $GPGLL)
+			case '$' : {
+				// +1 on len to include zero terminator
+				if (strlen(args[0]) && args[0][4]=='L' && args[0][5]=='L') {
+					memcpy(current_loc,args[0],strlen(args[0])+1);
+				}
+				break;
+			}
 
 			// Set node address
 			case 'N' :
