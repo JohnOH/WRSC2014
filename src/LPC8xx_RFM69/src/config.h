@@ -38,7 +38,8 @@
 
 
 // UART speed ('baud rate')
-#define UART_BPS (115200)
+#define UART_BPS (9600)
+//#define UART_BPS (115200)
 
 
 //#define USE_SYSTICK
