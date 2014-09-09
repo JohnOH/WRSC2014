@@ -34,8 +34,9 @@ int8_t node_addr = 0x7e;
 // Current location string specified by boat firmware. Format TBD.
 uint8_t current_loc[32];
 
-// For master controller: forward all received packets in promiscuous mode
-uint32_t flags = 0;
+// Various radio controller flags (done as one 32 bit register so as to
+// reduce code size and SRAM requirements).
+uint32_t flags = FLAG_RADIO_MODULE_ON;
 
 
 void loopDelay(uint32_t i) {
@@ -131,16 +132,21 @@ void report_error (uint8_t cmd, int32_t code) {
 
 int main(void) {
 
+#ifdef LPC810
 	SwitchMatrix_NoSpi_Init();
+#endif
+#ifdef LPC812
+	SwitchMatrix_Init();
+#endif
 
 	GPIOInit();
 
 	MyUARTInit(LPC_USART0, UART_BPS);
 
 
-#if !defined (LPC810_NOSPI)
+//#if !defined (LPC810_NOSPI)
 	spi_init();
-#endif
+//#endif
 
 	// Configure hardware interface to radio module
 	rfm69_init();
@@ -165,9 +171,22 @@ int main(void) {
 	// Display firmware version on boot
 	cmd_version(1,NULL);
 
+	/*
 	rfm69_register_write(RFM69_OPMODE,
 			RFM69_OPMODE_Mode_VALUE(RFM69_OPMODE_Mode_RX)
 			);
+	*/
+
+	// Optional Diagnostic LED. Configure pin for output and blink 3 times.
+#ifdef FEATURE_LED
+	GPIOSetDir(0,LED_PIN,1);
+	for (i = 0; i < 3; i++)	{
+		GPIOSetBitValue(0,LED_PIN,1);
+		loopDelay(200000);
+		GPIOSetBitValue(0,LED_PIN,0);
+		loopDelay(200000);
+	}
+#endif
 
 
 	while (1) {
@@ -201,53 +220,63 @@ int main(void) {
 				// set by the UART 'L' command verbatim.
 				case 'R' :
 				{
-					MyUARTSendStringZ(LPC_USART0,"Sending loc: ");
-
+					MyUARTSendStringZ(LPC_USART0,"i Sending loc to ");
+					MyUARTSendStringZ(LPC_USART0," ");
+					MyUARTPrintHex(LPC_USART0,node_addr);
+					MyUARTSendStringZ(LPC_USART0," len=");
+					int loc_len = strlen(current_loc);
+					MyUARTPrintHex(LPC_USART0, loc_len);
 					// report position
-					int payload_len = strlen(current_loc) + 3;
+					int payload_len = loc_len + 3;
 					uint8_t payload[payload_len];
 					payload[0] = from_addr;
 					payload[1] = node_addr;
 					payload[2] = 'r';
-					memcpy(payload+3,current_loc,payload_len-3);
+					memcpy(payload+3,current_loc,loc_len);
 
-					loopDelay(5000000);
+					//loopDelay(5000000);
 
 					MyUARTSendStringZ(LPC_USART0,current_loc);
 					MyUARTSendCRLF(LPC_USART0);
 
 
 					rfm69_frame_tx(payload, payload_len);
+					break;
 				}
 				// Remote register read
 				case 'X' : {
 					uint8_t base_addr = frxbuf[3];
 					uint8_t read_len = frxbuf[4];
+					if (read_len>16) read_len = 16;
 					uint8_t payload[read_len+4];
 					payload[0] = from_addr;
 					payload[1] = node_addr;
 					payload[2] = 'x';
 					payload[3] = base_addr;
-					for (i = base_addr; i < (base_addr+read_len); i++) {
-						payload[i+4] = rfm69_register_read(i);
+					for (i = 0; i < read_len; i++) {
+						payload[i+4] = rfm69_register_read(base_addr+i);
 					}
 					rfm69_frame_tx(payload, read_len+4);
+					break;
 				}
+
 				// Remote register write
 				case 'Y' : {
 					uint8_t base_addr = frxbuf[3];
-					uint8_t write_len = frxbuf[4];
-
+					uint8_t write_len = frame_len - 4;
+					if (write_len > 16) write_len = 16;
 					int i;
-					for (i = base_addr; i < (base_addr+write_len); i++) {
-						rfm69_register_write(i,frxbuf[i+5]);
+					for (i = 0; i < write_len; i++) {
+						rfm69_register_write(base_addr+i,frxbuf[i+4]);
 					}
 					uint8_t payload[2];
 					payload[0] = from_addr;
 					payload[1] = node_addr;
 					payload[2] = 'y';
-					rfm69_frame_tx(payload, 2);
+					rfm69_frame_tx(payload, 3);
+					break;
 				}
+
 				// If none of the above cases match, output packet to UART
 				default: {
 
@@ -315,6 +344,14 @@ int main(void) {
 				break;
 			}
 
+			// Display MCU unique ID
+			case 'I' : {
+				MyUARTSendStringZ(LPC_USART0,"u ");
+				MyUARTPrintHex(LPC_USART0,get_mcu_serial_number());
+				MyUARTSendCRLF(LPC_USART0);
+				break;
+			}
+
 			// Set current location
 			case 'L' : {
 				// +1 on len to include zero terminator
@@ -330,14 +367,6 @@ int main(void) {
 			}
 
 
-			// Promiscuous mode
-			/*
-			case 'P' : {
-				cmd_promiscuous_mode(argc, args);
-				break;
-			}
-			*/
-
 			// Read RFM69 register
 			case 'R' : {
 				// Parameter is register address
@@ -351,14 +380,9 @@ int main(void) {
 				break;
 			}
 
-			// Display MCU unique ID
-			case 'U' : {
-				MyUARTSendStringZ(LPC_USART0,"u ");
-				MyUARTPrintHex(LPC_USART0,get_mcu_serial_number());
-				MyUARTSendCRLF(LPC_USART0);
-				break;
-			}
 
+
+#ifdef LPC810
 			case 'S' : {
 				if (args[1][0]=='1') {
 					// Note will disconnect SWD
@@ -381,6 +405,7 @@ int main(void) {
 				}
 				break;
 			}
+#endif
 
 			// Transmit arbitrary packet
 			case 'T' : {
@@ -394,6 +419,15 @@ int main(void) {
 						);
 				break;
 			}
+
+#ifdef FEATURE_LED
+			// Turn LED on/off
+			case 'U' : {
+				int i = parse_hex(args[1]);
+				GPIOSetBitValue(0,LED_PIN,i);
+				break;
+			}
+#endif
 
 			// RFM69 controller (this) firmware
 			case 'V' : {
