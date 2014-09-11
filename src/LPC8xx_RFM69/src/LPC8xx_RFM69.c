@@ -36,7 +36,8 @@ uint8_t current_loc[32];
 
 // Various radio controller flags (done as one 32 bit register so as to
 // reduce code size and SRAM requirements).
-uint32_t flags = FLAG_RADIO_MODULE_ON;
+uint32_t flags = FLAG_RADIO_MODULE_ON
+		| FLAG_BEACON_ENABLE;
 
 
 void loopDelay(uint32_t i) {
@@ -46,6 +47,10 @@ void loopDelay(uint32_t i) {
 }
 
 #ifdef LPC812
+/**
+ * UART RXD on SOIC package pin 19
+ * UART TXD on SOIC package pin 5
+ */
 void SwitchMatrix_Init()
 {
     /* Enable SWM clock */
@@ -180,7 +185,12 @@ int main(void) {
 	 * is delayed to allow opportunity to reprogram device via SWD.
 	 */
 #ifdef LPC810
-	SwitchMatrix_NoSpi_Init();
+
+	// Delay to allow debug probe to reflash
+	loopDelay(5000000);
+
+	// Won't be able to use debug probe from this point on (unless UART S 0 command used)
+	SwitchMatrix_Spi_Init();
 #elif LPC812
 	SwitchMatrix_Init();
 #endif
@@ -209,6 +219,9 @@ int main(void) {
 	uint8_t frxbuf[66];
 	uint8_t frame_len;
 
+	// Acts as a crude clock
+	uint32_t loopCounter = 0;
+
 	int argc;
 
 	// Display firmware version on boot
@@ -227,6 +240,18 @@ int main(void) {
 
 	// Main program loop
 	while (1) {
+
+		loopCounter++;
+
+		// Send beacon signal every 10s or so
+		if ( (flags&FLAG_BEACON_ENABLE) && (loopCounter & 0x1FFF) == 0) {
+			uint8_t payload[3];
+			payload[0] = 0xff;
+			payload[1] = node_addr;
+			payload[2] = 'k';
+			rfm69_frame_tx(payload,3);
+			MyUARTSendStringZ(LPC_USART0,"k\r\n");
+		}
 
 		// Check for received packet on RFM69
 		if ( (flags&FLAG_RADIO_MODULE_ON) && rfm69_payload_ready()) {
@@ -256,6 +281,16 @@ int main(void) {
 
 				switch (msgType) {
 
+#ifdef FEATURE_REMOTE_PKT_TX
+				// Experimental remote packet transmit / relay
+				case 'B' : {
+					int payload_len = frame_len - 3;
+					uint8_t payload[payload_len];
+					memcpy(payload,frxbuf+3,payload_len);
+					rfm69_frame_tx(payload, payload_len);
+					break;
+				}
+#endif
 				// Message requesting position report. This will return the string
 				// set by the UART 'L' command verbatim.
 				case 'R' :
@@ -455,35 +490,6 @@ int main(void) {
 #ifdef LPC810
 			// SPI pin initialize (delayed to keep SWD on bootup)
 			case 'S' : {
-
-				// TOD0 temporary hack: SPI loopback test
-				if (args[1][0]=='L') {
-					/*
-					for (i = 0; i < 255; i++) {
-						if (spi_transfer_byte(i) != i) {
-							report_error('S',E_SPI);
-							break;
-						}
-					}
-					*/
-					for (i = 0; i < 100000; i++) {
-					GPIOSetBitValue(0,MOSI_PIN,1);
-					loopDelay(10);
-					GPIOSetBitValue(0,MOSI_PIN,0);
-					loopDelay(10);
-					GPIOSetBitValue(0,SCK_PIN,1);
-					loopDelay(10);
-					GPIOSetBitValue(0,SCK_PIN,0);
-					loopDelay(10);
-					GPIOSetBitValue(0,SS_PIN,1);
-					loopDelay(10);
-					GPIOSetBitValue(0,SS_PIN,0);
-					loopDelay(10);
-
-					}
-
-
-				}
 
 				if (args[1][0]=='1') {
 					// Note will disconnect SWD
