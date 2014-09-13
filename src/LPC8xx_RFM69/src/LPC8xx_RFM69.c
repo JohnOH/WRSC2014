@@ -176,6 +176,15 @@ void ledBlink () {
 }
 #endif
 
+/**
+ * Use function to set flags because some flag changes require one-time actions
+ * at the time of write.
+ */
+/*
+void flags_set (uint32_t flagsValue) {
+}
+*/
+
 int main(void) {
 
 	/*
@@ -242,6 +251,12 @@ int main(void) {
 	while (1) {
 
 		loopCounter++;
+
+#ifdef FEATURE_SLEEP
+		if ( ! (flags & FLAG_RADIO_MODULE_ON)) {
+			__WFI();
+		}
+#endif
 
 		// Send heartbeat signal every 10s or so
 		if ( (flags&FLAG_HEARTBEAT_ENABLE) && (loopCounter & 0x1FFF) == 0) {
@@ -464,6 +479,18 @@ int main(void) {
 				break;
 			}
 
+#ifdef FEATURE_SLEEP
+			case 'M' : {
+				if (args[1][0]=='1') {
+					flags &= ~FLAG_RADIO_MODULE_ON;
+					rfm69_mode(RFM69_OPMODE_Mode_RX);
+				} else if (args[1][0]=='1') {
+					flags |= FLAG_RADIO_MODULE_ON;
+					rfm69_mode(RFM69_OPMODE_Mode_SLEEP);
+				}
+			}
+#endif
+
 			// Set node address
 			case 'N' :
 			{
@@ -511,9 +538,12 @@ int main(void) {
 					report_error('T', status);
 				}
 				// Back to RX mode
+				/*
 				rfm69_register_write(RFM69_OPMODE,
 						RFM69_OPMODE_Mode_VALUE(RFM69_OPMODE_Mode_RX)
 						);
+				*/
+				rfm69_mode(RFM69_OPMODE_Mode_RX);
 				break;
 			}
 
