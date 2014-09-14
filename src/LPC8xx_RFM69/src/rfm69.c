@@ -28,9 +28,14 @@ void rfm69_config() {
  */
 void rfm69_mode(uint8_t mode) {
 	uint8_t regVal = rfm69_register_read(RFM69_OPMODE);
-	regVal &= RFM69_OPMODE_Mode_MASK;
-	regVal |= RFM69_OPMODE_ListenOn_VALUE(mode);
+	regVal &= ~RFM69_OPMODE_Mode_MASK;
+	regVal |= RFM69_OPMODE_Mode_VALUE(mode);
 	rfm69_register_write(RFM69_OPMODE,regVal);
+
+	// Wait until mode change is complete
+	// IRQFLAGS1[7] ModeReady: Set to 0 when mode change, 1 when mode change complete
+	while ( (rfm69_register_read(RFM69_IRQFLAGS1) & RFM69_IRQFLAGS1_ModeReady) == 0) ;
+
 }
 
 /**
@@ -104,7 +109,7 @@ int rfm69_frame_rx(uint8_t *buf, int maxlen, uint8_t *rssi) {
 
     for (i = 0; i < frame_length; i++) {
     	if (i == maxlen) {
-    		return -2; // frame too long
+    		return E_PKT_TOO_LONG;
     	}
     	buf[i] = spi_transfer_byte(0);
     }
@@ -134,10 +139,6 @@ void rfm69_frame_tx(uint8_t *buf, int len) {
 	rfm69_mode(RFM69_OPMODE_Mode_STDBY);
 
 
-
-	// Wait until STDBY mode ready
-	// IRQFLAGS1[7] ModeReady: Set to 0 when mode change, 1 when mode change complete
-	while (rfm69_register_read(RFM69_IRQFLAGS1) & 0x80 == 0) ;
 
 	// Write frame to FIFO
 	rfm69_nss_assert();
@@ -187,7 +188,9 @@ void rfm69_frame_tx(uint8_t *buf, int len) {
 
 	// Wait until STDBY mode ready
 	// IRQFLAGS1[7] ModeReady: Set to 0 when mode change, 1 when mode change complete
-	while (rfm69_register_read(RFM69_IRQFLAGS1) & 0x80 == 0) ;
+	//while ( (rfm69_register_read(RFM69_IRQFLAGS1) & RFM69_IRQFLAGS1_ModeReady) == 0) ;
+
+
 }
 
 uint8_t rfm69_register_read (uint8_t reg_addr) {
