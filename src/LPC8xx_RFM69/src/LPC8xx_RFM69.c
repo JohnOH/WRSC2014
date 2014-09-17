@@ -6,6 +6,20 @@
  Copyright   : BSD licence. TODO: add licence to header.
  Description : TODO
 ===============================================================================
+
+TODO:
+For v0.2.0:
+* Move to 4 byte header. Having an extra byte for special flags (like ack at MAC level).
+* Also use struct: might enable greater code density.
+*
+* Change radio level remote register read/write with a remote command execution: ie take
+* bytes from radio packet and inject into UART receive buffer and trigger a command, as if
+* arriving from UART. To enable responses etc, have command to forward UART command responses
+* and errors via radio to one or more nodes. This can then replace the following features:
+* o Packet Forward (just exec a T command remotely)
+* o Register Read/Write
+* o Heartbeat interval set
+*
 */
 
 
@@ -19,14 +33,17 @@
 
 #include "config.h"
 #include "myuart.h"
+#include "sleep.h"
 #include "print_util.h"
 #include "rfm69.h"
 #include "cmd.h"
 #include "err.h"
 #include "flags.h"
 
+#include "lpc8xx_pmu.h"
+
+
 #define SYSTICK_DELAY		(SystemCoreClock/100)
-volatile uint32_t TimeTick = 0;
 
 // Address of this node
 int8_t node_addr = DEFAULT_NODE_ADDR;
@@ -36,14 +53,9 @@ uint8_t current_loc[32];
 
 // Various radio controller flags (done as one 32 bit register so as to
 // reduce code size and SRAM requirements).
-uint32_t flags =
-		FLAG_RADIO_MODULE_ON
-		| FLAG_HEARTBEAT_ENABLE;
-
-
-#ifdef FEATURE_HEARTBEAT
-uint32_t heartbeat_interval = 0x1FFFF;
-#endif
+uint32_t flags = MODE_LOW_POWER_POLL
+		| (0x4<<8) // poll interval 500ms x 2^(3+1) = 8s
+		;
 
 void loopDelay(uint32_t i) {
 	while (--i!=0) {
@@ -87,7 +99,7 @@ void SwitchMatrix_Init()
 void SwitchMatrix_NoSpi_Init_old()
 {
     /* Enable SWM clock */
-    LPC_SYSCON->SYSAHBCLKCTRL |= (1<<7);
+    //LPC_SYSCON->SYSAHBCLKCTRL |= (1<<7);
 
     /* Pin Assign 8 bit Configuration */
     /* U0_TXD */
@@ -104,7 +116,7 @@ void SwitchMatrix_NoSpi_Init_old()
 void SwitchMatrix_NoSpi_Init()
 {
     /* Enable SWM clock */
-    LPC_SYSCON->SYSAHBCLKCTRL |= (1<<7);
+    //LPC_SYSCON->SYSAHBCLKCTRL |= (1<<7);
 
     /* Pin Assign 8 bit Configuration */
     /* U0_TXD */
@@ -128,7 +140,7 @@ void SwitchMatrix_NoSpi_Init()
 void SwitchMatrix_Spi_Init()
 {
     /* Enable SWM clock */
-    LPC_SYSCON->SYSAHBCLKCTRL |= (1<<7);
+    //LPC_SYSCON->SYSAHBCLKCTRL |= (1<<7);
 
     /* Pin Assign 8 bit Configuration */
     /* U0_TXD */
@@ -161,12 +173,14 @@ uint32_t get_mcu_serial_number () {
 
 /**
  * Print error code 'code' while executing command 'cmd' to UART.
+ * @param cmd  Command that generated the error
+ * @param code Error code (ref err.h)
  */
 void report_error (uint8_t cmd, int32_t code) {
 	if (code<0) code = -code;
-	MyUARTSendStringZ(LPC_USART0,"e ");
+	MyUARTSendStringZ(LPC_USART0,(uint8_t *)"e ");
 	MyUARTSendByte(LPC_USART0,cmd);
-	MyUARTSendStringZ(LPC_USART0," ");
+	MyUARTSendStringZ(LPC_USART0,(uint8_t *)" ");
 	MyUARTPrintHex(LPC_USART0,code);
 	MyUARTSendCRLF(LPC_USART0);
 }
@@ -186,16 +200,38 @@ void ledBlink () {
 }
 #endif
 
+
 /**
- * Use function to set flags because some flag changes require one-time actions
- * at the time of write.
+ * New radio system (RFM69 module + MCU) operating modes:
+ *
+ * Mode 0 : Radio off, MCU in deepsleep. Can be woken by host. Current
+ * drain ~60uA.
+ *
+ * Mode 1 : (reserved)
+ *
+ * Mode 2 : Radio in low power polling mode (poll, and listen, then sleep). MCU in
+ * deepsleep during sleep phase. The poll packet replaces the heartbeat feature.
+ *
+ * Mode 3 : Radio on RX, listening for packets. MCU polling radio module continuously.
+ *
+ * Mode is stored in bits 3:0 of 'flags'.
  */
-/*
-void flags_set (uint32_t flagsValue) {
+void setOpMode (uint32_t mode) {
+	flags &= ~0xf;
+	flags |= mode;
 }
-*/
 
 int main(void) {
+
+	// Enable MCU subsystems needed in this application in one step. Saves bytes.
+	// (it would be preferable to have in each subsystem init, but we're very
+	// tight for space on LPC810).
+    LPC_SYSCON->SYSAHBCLKCTRL |=
+    		(1<<7)    // Switch Matrix (SWM)
+    		| (1<<9)  // Wake Timer (WKT)
+    		| (1<<14) // USART0
+    		;
+
 
 	/*
 	 * LPC8xx features a SwitchMatrix which allows most functions to be mapped to most pins.
@@ -210,7 +246,7 @@ int main(void) {
 	SwitchMatrix_Init();
 #endif
 
-	GPIOInit();
+	//GPIOInit();
 	MyUARTInit(LPC_USART0, UART_BPS);
 
 	// Display firmware version on boot
@@ -218,7 +254,7 @@ int main(void) {
 
 
 #ifdef LPC810
-	// Delay to allow debug probe to reflash
+	// Long delay (10-20seconds) to allow debug probe to reflash. Remove in production.
 	loopDelay(20000000);
 
 	// Won't be able to use debug probe from this point on (unless UART S 0 command used)
@@ -234,8 +270,6 @@ int main(void) {
 
 	// Configure hardware interface to radio module
 	rfm69_init();
-
-	int i;
 
 	uint8_t rssi;
 
@@ -270,27 +304,66 @@ int main(void) {
 
 		loop_counter++;
 
-#ifdef FEATURE_SLEEP
-		// If the radio is off then sleep until next interrupt (probably from UART)
-		if ( ! (flags & FLAG_RADIO_MODULE_ON)) {
+		if ( (flags&0xf) == MODE_AWAKE) {
+			rfm69_mode(RFM69_OPMODE_Mode_RX);
+		}
+
+#ifdef FEATURE_DEEPSLEEP
+		// Test for MODE_OFF or MODE_LOW_POWER_POLL
+		if ( (flags&0x1) == 0) {
+
+			// Set radio in SLEEP mode
+			rfm69_mode(RFM69_OPMODE_Mode_SLEEP);
+
+			// Setup power management registers so that WFI causes DEEPSLEEP
+			prepareForPowerDown();
+
+			// Writing into WKT counter automatically starts wakeup timer
+			// Polling interval determined by bits 11:8 of flags.
+			// Ts = 0.5 * 2 ^ flags[11:8]
+			// is 500 ms x 2 to the power of this value (ie 0=500ms, 1=1s, 2=2s,3=4s,4=8s...)
+			LPC_WKT->COUNT = 5000 << ((flags>>8)&0xf);
+
+			// DeepSleep until WKT interrupt
+			__WFI();
+
+			// Allow time for clocks to stabilise after wake
+			// TODO: can we use WKT and WFI?
+			loopDelay(20000);
+
+			// Indicator to host there is a short time window to issue command
+			MyUARTSendStringZ(LPC_USART0,"z\r\n");
+
+			// Small window of time to allow host to exit sleep mode by issuing command.
+			// Use WKT timer to wake from regular sleep mode (where UART works).
+			SCB->SCR &= ~NVIC_LP_SLEEPDEEP;
+		}
+#else
+		// If not using DEEPSLEEP, use regular SLEEP mode until next interrupt arrives
+		if ( (flags&0xf) != MODE_AWAKE ) {
 			__WFI();
 		}
 #endif
 
-#ifdef FEATURE_HEARTBEAT
-		// Send heartbeat signal every 10s or so
-		if ( (flags&FLAG_RADIO_MODULE_ON) && (flags&FLAG_HEARTBEAT_ENABLE) && (loop_counter % heartbeat_interval) == 0) {
+		// If in MODE_LOW_POWER_POLL send poll packet
+		if ( (flags&0xf) == MODE_LOW_POWER_POLL) {
 			uint8_t payload[3];
 			payload[0] = 0xff;
 			payload[1] = node_addr;
-			payload[2] = 'h';
+			payload[2] = 'z';
 			rfm69_frame_tx(payload,3);
-			MyUARTSendStringZ(LPC_USART0,"h\r\n");
+
+			// Allow time for response (120ms)
+			// TODO: this is only long enough for a 4 or 5 bytes of payload.
+			// Need to check for incoming signal and delay longer if transmission
+			// in progress (or just delay longer.. which will affect battery drain).
+			rfm69_mode(RFM69_OPMODE_Mode_RX);
+			LPC_WKT->COUNT = 1200;
+			__WFI();
 		}
-#endif
 
 #ifdef FEATURE_LINK_LOSS_RESET
-		if (loop_counter - last_frame_time > 0x8FFFF) {
+		if ( (loop_counter - last_frame_time) > 0x8FFFF) {
 			report_error('$',E_LINK_LOSS_RESET);
 			loopDelay(200000);
 			NVIC_SystemReset();
@@ -298,14 +371,14 @@ int main(void) {
 #endif
 
 		// Check for received packet on RFM69
-		if ( (flags&FLAG_RADIO_MODULE_ON) && rfm69_payload_ready()) {
+		if ( ((flags&0xf)!=MODE_ALL_OFF) && rfm69_payload_ready()) {
 
 			// Yes, frame ready to be read from FIFO
 			frame_len = rfm69_frame_rx(frxbuf,66,&rssi);
 
 			// TODO: tidy this
 			// SPI error
-			if (frame_len>0) {
+			//if (frame_len>0) {
 
 				// Mark time of last incoming good frame
 				last_frame_time = loop_counter;
@@ -314,9 +387,9 @@ int main(void) {
 				// 8 bit to address
 				// 8 bit from address
 				// 8 bit message type
-			uint8_t to_addr = frxbuf[0];
-			uint8_t from_addr = frxbuf[1];
-			uint8_t msgType = frxbuf[2];
+				uint8_t to_addr = frxbuf[0];
+				uint8_t from_addr = frxbuf[1];
+				uint8_t msgType = frxbuf[2];
 
 			// 0xff is the broadcast address
 			if ( (flags&FLAG_PROMISCUOUS_MODE) || to_addr == 0xff || to_addr == node_addr) {
@@ -336,30 +409,12 @@ int main(void) {
 				}
 #endif
 
-#ifdef FEATURE_HEARTBEAT
-				case 'H' : {
-					heartbeat_interval = frxbuf[3]<<16;
-					MyUARTSendStringZ(LPC_USART0,"h ");
-					MyUARTPrintHex(heartbeat_interval);
-					MyUARTSendCRLF(LPC_USART0);
-					break;
-				}
-#endif
-
 				// Message requesting position report. This will return the string
 				// set by the UART 'L' command verbatim.
 				case 'R' :
+				case 'z' : // for testing only
 				{
 					int loc_len = strlen(current_loc);
-
-#ifdef FEATURE_DEBUG
-					MyUARTSendStringZ(LPC_USART0,"i Sending loc to ");
-					MyUARTSendStringZ(LPC_USART0," ");
-					MyUARTPrintHex(LPC_USART0,node_addr);
-					MyUARTSendStringZ(LPC_USART0," len=");
-					MyUARTPrintHex(LPC_USART0, loc_len);
-#endif
-
 					// report position
 					int payload_len = loc_len + 3;
 					uint8_t payload[payload_len];
@@ -367,16 +422,11 @@ int main(void) {
 					payload[1] = node_addr;
 					payload[2] = 'r';
 					memcpy(payload+3,current_loc,loc_len);
-
-#ifdef FEATURE_DEBUG
-					MyUARTSendStringZ(LPC_USART0,current_loc);
-					MyUARTSendCRLF(LPC_USART0);
-#endif
-
 					rfm69_frame_tx(payload, payload_len);
 					break;
 				}
-#ifdef FEATURE_REMOTE_REG_RW
+
+#ifdef FEATURE_REMOTE_REG_READ
 				// Remote register read
 				case 'X' : {
 					uint8_t base_addr = frxbuf[3];
@@ -387,13 +437,16 @@ int main(void) {
 					payload[1] = node_addr;
 					payload[2] = 'x';
 					payload[3] = base_addr;
+					int i;
 					for (i = 0; i < read_len; i++) {
 						payload[i+4] = rfm69_register_read(base_addr+i);
 					}
 					rfm69_frame_tx(payload, read_len+4);
 					break;
 				}
+#endif
 
+#ifdef FEATURE_REMOTE_REG_WRITE
 				// Remote register write
 				case 'Y' : {
 					uint8_t base_addr = frxbuf[3];
@@ -410,6 +463,32 @@ int main(void) {
 					rfm69_frame_tx(payload, 3);
 					break;
 				}
+
+
+#endif
+
+#ifdef FEATURE_REMOTE_COMMAND
+				case 'D' : {
+					// If there is an uncompleted UART command in buffer then
+					// remote command takes priority and whatever is in the
+					// command buffer is dropped. Output an error to indicate
+					// this has happened.
+					// TODO: should we disable UART interrupt for this block?
+					// because incoming UART char between now and cmd parse could
+					// cause corruption of cmd buffer.
+					if (MyUARTGetBufIndex()>0) {
+						MyUARTBufReset();
+						report_error('D',E_CMD_DROPPED);
+					}
+					MyUARTSendStringZ(LPC_USART0, "d ");
+					int payload_len = frame_len - 3;
+					memcpy(cmdbuf,frxbuf+3,payload_len);
+					cmdbuf[payload_len] = 0; // zero terminate buffer
+					MyUARTSendStringZ(LPC_USART0,cmdbuf);
+					MyUARTSendCRLF(LPC_USART0);
+					MyUARTSetBufFlags(UART_BUF_FLAG_EOL);
+					break;
+				}
 #endif
 
 #ifdef FEATURE_LED
@@ -424,7 +503,6 @@ int main(void) {
 					break;
 				}
 #endif
-
 
 				// If none of the above cases match, output packet to UART
 				default: {
@@ -457,17 +535,22 @@ int main(void) {
 			}
 
 
-			} // end frame len valid check
+			//} // end frame len valid check
 		}
 
 		if (MyUARTGetBufFlags() & UART_BUF_FLAG_EOL) {
 
-			MyUARTSendCRLF(LPC_USART0);
+#ifdef FEATURE_DEEPSLEEP
+			// Any command will set mode to MODE_AWAKE if in MODE_ALL_OFF or MODE_LOW_POWER_POLL
+			// TODO: will probably want to exclude remote commands
+			setOpMode(MODE_AWAKE);
+#endif
 
+			MyUARTSendCRLF(LPC_USART0);
 
 			cmdbuf = MyUARTGetBuf();
 
-			// Parse command line
+			// Split command line into parameters (separated by spaces)
 			argc = 1;
 			args[0] = cmdbuf;
 			while (*cmdbuf != 0) {
@@ -519,6 +602,8 @@ int main(void) {
 				memcpy(current_loc,args[1],strlen(args[1])+1);
 				break;
 			}
+
+#ifdef FEATURE_NMEA_INPUT
 			// NMEA (only interested in $GPGLL)
 			case '$' : {
 				// +1 on len to include zero terminator
@@ -527,24 +612,35 @@ int main(void) {
 				}
 				break;
 			}
-
-#ifdef FEATURE_SLEEP
-			case 'M' : {
-				if (args[1][0]=='1') {
-					flags &= ~FLAG_RADIO_MODULE_ON;
-					rfm69_mode(RFM69_OPMODE_Mode_RX);
-				} else if (args[1][0]=='1') {
-					flags |= FLAG_RADIO_MODULE_ON;
-					rfm69_mode(RFM69_OPMODE_Mode_SLEEP);
-				}
-			}
 #endif
+
+			// Set radio system mode
+			// TODO is this necessary now? Use F command instead.
+			/*
+			case 'M' : {
+				flags &= ~0xf;
+				if (args[1][0]=='0') {
+					// no action
+				} else if (args[1][0]=='2') {
+					flags |= MODE_LOW_POWER_POLL;
+				} else if (args[1][0]=='3') {
+					flags |= MODE_AWAKE;
+				}
+				break;
+			}
+			*/
 
 			// Set node address
 			case 'N' :
 			{
 				cmd_set_node_addr(argc, args);
 				break;
+			}
+
+			// Experimental reset
+			case 'Q' : {
+				NVIC_SystemReset();
+				// no need for break
 			}
 
 
@@ -564,18 +660,16 @@ int main(void) {
 
 
 #ifdef LPC810
-			// SPI pin initialize (delayed to keep SWD on bootup)
+			// Allow re-enabling of SWD from UART API to facilitate reflashing
 			case 'S' : {
-
 				if (args[1][0]=='1') {
 					// Note will disconnect SWD
 					SwitchMatrix_Spi_Init();
 					spi_init();
 				} else {
+					// Enable SWD pins
 					SwitchMatrix_NoSpi_Init();
 				}
-
-
 				break;
 			}
 #endif
@@ -586,13 +680,6 @@ int main(void) {
 				if ( status ) {
 					report_error('T', status);
 				}
-				// Back to RX mode
-				/*
-				rfm69_register_write(RFM69_OPMODE,
-						RFM69_OPMODE_Mode_VALUE(RFM69_OPMODE_Mode_RX)
-						);
-				*/
-				rfm69_mode(RFM69_OPMODE_Mode_RX);
 				break;
 			}
 
@@ -630,18 +717,9 @@ int main(void) {
 			MyUARTBufReset();
 
 
-		}
-
-		// TODO: we could save some MCU power by delaying and entering sleep
-		// state before polling RFM69 for reception of another packet. An
-		// possible alternative approach is to configure RFM69 digital IO
-		// pins to trigger interrupt on MCU on packet reception. However in the
-		// case of LPC810 there are no available pins for this (unless we try
-		// something clever by piggybacking this on another line. Probably not
-		// worth the effort as this MCU current requirements are modest.
-		//__WFI();
+		} // end command switch block
 
 
-	}
+	} // end main loop
 
 }
