@@ -30,7 +30,7 @@ void prepareForPowerDown () {
 
 	  // Step 2: Select the power configuration in Power-down mode in the
 	  // PDSLEEPCFG (Table 35) register
-	  //LPC_SYSCON->PDSLEEPCFG = LPC_SYSCON->PDSLEEPCFG;
+	  LPC_SYSCON->PDSLEEPCFG = ~1<<6; // WDT on during deep sleep/power down
 
 
 	  // Step 3: Select the power configuration after wake-up in the
@@ -92,9 +92,6 @@ void prepareForPowerDown () {
 
 void WKT_IRQHandler(void)
 {
-  //if ( LPC_WKT->CTRL & 0x02 )
-  //{
-		LPC_WKT->CTRL |= 0x02;			/* clear interrupt flag */
-  //}
+	LPC_WKT->CTRL |= 0x02;			/* clear interrupt flag */
 }
 

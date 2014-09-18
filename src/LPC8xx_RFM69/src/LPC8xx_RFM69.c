@@ -62,7 +62,10 @@ void loopDelay(uint32_t i) {
 		__NOP();
 	}
 }
-
+void wktDelay(uint32_t i) {
+	LPC_WKT->COUNT = i;
+	__WFI();
+}
 #ifdef LPC812
 /**
  * UART RXD on SOIC package pin 19
@@ -178,11 +181,11 @@ uint32_t get_mcu_serial_number () {
  */
 void report_error (uint8_t cmd, int32_t code) {
 	if (code<0) code = -code;
-	MyUARTSendStringZ(LPC_USART0,(uint8_t *)"e ");
-	MyUARTSendByte(LPC_USART0,cmd);
-	MyUARTSendStringZ(LPC_USART0,(uint8_t *)" ");
-	MyUARTPrintHex(LPC_USART0,code);
-	MyUARTSendCRLF(LPC_USART0);
+	MyUARTSendStringZ((uint8_t *)"e ");
+	MyUARTSendByte(cmd);
+	MyUARTSendStringZ((uint8_t *)" ");
+	MyUARTPrintHex(code);
+	MyUARTSendCRLF();
 }
 
 #ifdef FEATURE_LED
@@ -228,9 +231,12 @@ int main(void) {
 	// tight for space on LPC810).
     LPC_SYSCON->SYSAHBCLKCTRL |=
     		(1<<7)    // Switch Matrix (SWM)
+    		| (1<<6)  // GPIO
     		| (1<<9)  // Wake Timer (WKT)
     		| (1<<14) // USART0
+    		| (1<<17) // Watchdog timer
     		;
+
 
 
 	/*
@@ -247,7 +253,7 @@ int main(void) {
 #endif
 
 	//GPIOInit();
-	MyUARTInit(LPC_USART0, UART_BPS);
+	MyUARTInit(UART_BPS);
 
 	// Display firmware version on boot
 	cmd_version(1,NULL);
@@ -255,6 +261,7 @@ int main(void) {
 
 #ifdef LPC810
 	// Long delay (10-20seconds) to allow debug probe to reflash. Remove in production.
+	// Tried using regular SLEEP mode for this, but seems debugger doesn't work in that mode.
 	loopDelay(20000000);
 
 	// Won't be able to use debug probe from this point on (unless UART S 0 command used)
@@ -264,6 +271,26 @@ int main(void) {
 	// Display firmware version again to indicate SPI is in operation
 	cmd_version(1,NULL);
 #endif
+
+
+	//
+    // Watchdog configuration
+	//
+
+	// Let WDT run while in power down mode
+	LPC_SYSCON->PDRUNCFG &= ~(0x1<<6);
+
+	// Setup watchdog oscillator frequency
+    /* Freq = 0.5Mhz, div_sel is 0x1F, divided by 64. WDT_OSC should be 7.8125khz */
+    LPC_SYSCON->WDTOSCCTRL = (0x1<<5)|0x1F;
+    LPC_WWDT->TC = 0x100000;
+    LPC_WWDT->MOD = (1<<0) // WDEN enable watchdog
+    			| (1<<1); // WDRESET : enable watchdog to reset on timeout
+    // Watchdog feed sequence
+    LPC_WWDT->FEED = 0xAA;
+    LPC_WWDT->FEED = 0x55;
+    /* Make sure feed sequence executed properly */
+    //loopDelay(1000);
 
 
 	spi_init();
@@ -281,8 +308,7 @@ int main(void) {
 	uint8_t frame_len;
 
 	// Acts as a crude clock
-	uint32_t loop_counter = 0;
-	uint32_t last_frame_time = 0;
+//	uint32_t loop_counter = 0;
 
 	int argc;
 
@@ -302,7 +328,25 @@ int main(void) {
 	// Main program loop
 	while (1) {
 
-		loop_counter++;
+
+#ifdef FEATURE_TEMPERATURE
+
+		if ((flags&0xf)==MODE_LOW_POWER_POLL) {
+		// Must read temperature from STDBY or FS mode
+		rfm69_mode(RFM69_OPMODE_Mode_STDBY);
+
+		// Start temperature conversion
+		rfm69_register_write(0x4E,0x8);
+
+		// Should monitor register Temp1 bit 2 for transition to 0, but a dumb delay is more
+		// space efficient (down to last few bytes of flash!)
+		loopDelay(10000);
+
+		// Hack: put temperature into unused register (AESKey1) for remote reading
+		rfm69_register_write(0x3E,rfm69_register_read(0x4F));
+		}
+
+#endif
 
 		if ( (flags&0xf) == MODE_AWAKE) {
 			rfm69_mode(RFM69_OPMODE_Mode_RX);
@@ -332,7 +376,7 @@ int main(void) {
 			loopDelay(20000);
 
 			// Indicator to host there is a short time window to issue command
-			MyUARTSendStringZ(LPC_USART0,"z\r\n");
+			MyUARTSendStringZ("z\r\n");
 
 			// Small window of time to allow host to exit sleep mode by issuing command.
 			// Use WKT timer to wake from regular sleep mode (where UART works).
@@ -358,17 +402,14 @@ int main(void) {
 			// Need to check for incoming signal and delay longer if transmission
 			// in progress (or just delay longer.. which will affect battery drain).
 			rfm69_mode(RFM69_OPMODE_Mode_RX);
-			LPC_WKT->COUNT = 1200;
+
+			// Experimental: trig temperature measurement
+			//rfm69_register_write(0x4E, 1<<3);
+
+			LPC_WKT->COUNT = 2000;
 			__WFI();
 		}
 
-#ifdef FEATURE_LINK_LOSS_RESET
-		if ( (loop_counter - last_frame_time) > 0x8FFFF) {
-			report_error('$',E_LINK_LOSS_RESET);
-			loopDelay(200000);
-			NVIC_SystemReset();
-		}
-#endif
 
 		// Check for received packet on RFM69
 		if ( ((flags&0xf)!=MODE_ALL_OFF) && rfm69_payload_ready()) {
@@ -380,8 +421,9 @@ int main(void) {
 			// SPI error
 			//if (frame_len>0) {
 
-				// Mark time of last incoming good frame
-				last_frame_time = loop_counter;
+				// Feed watchdog
+			    LPC_WWDT->FEED = 0xAA;
+			    LPC_WWDT->FEED = 0x55;
 
 				// All frames have a common header
 				// 8 bit to address
@@ -412,7 +454,7 @@ int main(void) {
 				// Message requesting position report. This will return the string
 				// set by the UART 'L' command verbatim.
 				case 'R' :
-				case 'z' : // for testing only
+				//case 'z' : // for testing only
 				{
 					int loc_len = strlen(current_loc);
 					// report position
@@ -480,12 +522,12 @@ int main(void) {
 						MyUARTBufReset();
 						report_error('D',E_CMD_DROPPED);
 					}
-					MyUARTSendStringZ(LPC_USART0, "d ");
+					MyUARTSendStringZ("d ");
 					int payload_len = frame_len - 3;
 					memcpy(cmdbuf,frxbuf+3,payload_len);
 					cmdbuf[payload_len] = 0; // zero terminate buffer
-					MyUARTSendStringZ(LPC_USART0,cmdbuf);
-					MyUARTSendCRLF(LPC_USART0);
+					MyUARTSendStringZ(cmdbuf);
+					MyUARTSendCRLF();
 					MyUARTSetBufFlags(UART_BUF_FLAG_EOL);
 					break;
 				}
@@ -507,19 +549,19 @@ int main(void) {
 				// If none of the above cases match, output packet to UART
 				default: {
 
-					MyUARTSendStringZ(LPC_USART0, "p ");
+					MyUARTSendStringZ("p ");
 
-					print_hex8(LPC_USART0,frxbuf[0]);
-					MyUARTSendStringZ(LPC_USART0, " ");
-					print_hex8(LPC_USART0,frxbuf[1]);
-					MyUARTSendStringZ(LPC_USART0, " ");
+					print_hex8(frxbuf[0]);
+					MyUARTSendStringZ(" ");
+					print_hex8(frxbuf[1]);
+					MyUARTSendStringZ(" ");
 
 					int i;
 					for (i = 2; i < frame_len; i++) {
-						print_hex8(LPC_USART0,frxbuf[i]);
+						print_hex8(frxbuf[i]);
 					}
-					MyUARTSendStringZ (LPC_USART0," ");
-					print_hex8(LPC_USART0, rssi);
+					MyUARTSendStringZ (" ");
+					print_hex8(rssi);
 					MyUARTSendCRLF(LPC_USART0);
 				}
 				}
@@ -649,10 +691,10 @@ int main(void) {
 				// Parameter is register address
 				uint8_t *b;
 				int regAddr = parse_hex(args[1],&b);
-				MyUARTSendStringZ(LPC_USART0,"r ");
-				print_hex8 (LPC_USART0, regAddr);
-				MyUARTSendStringZ(LPC_USART0," ");
-				print_hex8 (LPC_USART0, rfm69_register_read(regAddr));
+				MyUARTSendStringZ("r ");
+				print_hex8 (regAddr);
+				MyUARTSendStringZ(" ");
+				print_hex8 (rfm69_register_read(regAddr));
 				MyUARTSendCRLF(LPC_USART0);
 				break;
 			}

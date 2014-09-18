@@ -64,8 +64,32 @@ uint8_t rfm69_payload_ready() {
 }
 
 /**
+ * Read temperature. Ref datasheet §3.4.17.
+ */
+uint8_t rfm69_temperature () {
+
+	// Save current operating mode
+	uint8_t currentMode = rfm69_register_read(RFM69_OPMODE);
+
+	// Must read temperature from STDBY or FS mode
+	rfm69_mode(RFM69_OPMODE_Mode_STDBY);
+	rfm69_register_write(0x4E,0x8);
+
+	// Should monitor register Temp1 bit 2 for transition to 0, but a dumb delay is more
+	// space efficient (down to last few bytes of flash!)
+	loopDelay(10000);
+	uint8_t temperature = rfm69_register_read(0x4F);
+
+	// Restore mode
+	rfm69_register_write(RFM69_OPMODE, currentMode);
+
+	return temperature;
+}
+
+/**
  * Retrieve a frame. If successful returns length of frame. If not an error code (negative value).
- * Frame is returned in buf but will not exceed length maxlen.
+ * Frame is returned in buf but will not exceed length maxlen. Should only be called when
+ * a frame is ready to download.
  *
  * @return frame_length if successful, else a negative value error code
  * Error codes:
@@ -81,7 +105,7 @@ int rfm69_frame_rx(uint8_t *buf, int maxlen, uint8_t *rssi) {
 
 	// Wait for IRQFLAGS2[2] PayloadReady
 	// TODO: implement timeout
-	while ((rfm69_register_read(RFM69_IRQFLAGS2) & RFM69_IRQFLAGS2_PayloadReady_MASK) == 0) ;
+	//while ((rfm69_register_read(RFM69_IRQFLAGS2) & RFM69_IRQFLAGS2_PayloadReady_MASK) == 0) ;
 
     uint8_t frame_length;
 
