@@ -37,27 +37,48 @@
  * Initialize SPI using bigbang (without SSP0 peripheral).
  */
 void spi_init () {
-	GPIOInit();
-	GPIOSetDir(PORT, SS_PIN, 1); // output
-	GPIOSetDir(PORT, SCK_PIN, 1);
-	GPIOSetDir(PORT, MOSI_PIN, 1);
-	GPIOSetDir(PORT, MISO_PIN, 0); // input
+
+	//GPIOInit();
+	/* Peripheral reset control to GPIO and GPIO INT, a "1" bring it out of reset. */
+	//LPC_SYSCON->PRESETCTRL &= ~(0x1<<10);
+	//LPC_SYSCON->PRESETCTRL |= (0x1<<10);
+
+	//GPIOSetDir(PORT, SS_PIN, 1); // output
+	//GPIOSetDir(PORT, SCK_PIN, 1);
+	//GPIOSetDir(PORT, MOSI_PIN, 1);
+	//GPIOSetDir(PORT, MISO_PIN, 0); // input
+
+	// Note: more space efficient (by 4 bytes) to load into regVal for manipulation
+	//LPC_GPIO_PORT->DIR0 |= (1<<SS_PIN) | (1<<SCK_PIN) | (1<<MOSI_PIN);
+	//LPC_GPIO_PORT->DIR0 &= ~(1<<MISO_PIN);
+	uint32_t regVal = LPC_GPIO_PORT->DIR0;
+	regVal |= (1<<SS_PIN) | (1<<SCK_PIN) | (1<<MOSI_PIN);
+	regVal &= ~(1<<MISO_PIN);
+	LPC_GPIO_PORT->DIR0 = regVal;
 }
 
 /**
  * Disable SPI pins (for power saving)
  */
+/*
 void spi_off () {
 	GPIOSetDir(PORT, SS_PIN, 0); // input
 	GPIOSetDir(PORT, SCK_PIN, 0);
 	GPIOSetDir(PORT, MOSI_PIN, 0);
 }
+*/
 
 static void spi_delay(void) {
+	/*
 	int i = 0;
 	for (i = 0; i < 4; i++) {
 		__NOP();
 	}
+	*/
+	__NOP();
+	__NOP();
+	//__NOP();
+	//__NOP();
 }
 
 void spi_assert_ss () {
@@ -66,7 +87,6 @@ void spi_assert_ss () {
 
 void spi_deassert_ss () {
 		SS_HIGH();
-
 }
 
 

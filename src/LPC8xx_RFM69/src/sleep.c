@@ -9,8 +9,31 @@
 #include "lpc8xx_pmu.h"
 
 #include "sleep.h"
+#include "config.h"
+
 
 void prepareForPowerDown () {
+
+	// Condition pins to minimize current use during sleep
+
+//#ifdef LPC812
+	// Experiment to disconnect UART to see if it reduces current during sleep
+	//LPC_SWM->PINASSIGN0 = 0xffffffffUL;
+
+	// Experiment (conducted w/o RFM69 radio connected): set SPI pins to output
+	// SPI pins output, all 0 results in 380uA
+	// SPI pins output, MISO=1, rest=0 328uA
+	// SPI pins output, MISO=MOSI=1, rest=0 275uA
+	// SPI pins output, MISO=MOSI=SCK=1, SS=0 222uA
+	// SPI pins output, all=1 results in 169uA power down current
+
+	// Experiment on LPC810 with RFM69HW connected:
+	// 44uA current consumption with all SPI pins output and high during power down mode.
+
+	LPC_GPIO_PORT->DIR0 |= 1<<MISO_PIN;
+	LPC_GPIO_PORT->SET0 = (1<<MISO_PIN) | (1<<MOSI_PIN) | (1<<SCK_PIN) | (1<<SS_PIN);
+
+//#endif
 
 	//
 	// UM10601 §5.7.6.2, p52: Programming Power-down mode.
@@ -24,13 +47,14 @@ void prepareForPowerDown () {
 	// Ref UM10601 §5.6.1, Table 44,  p46.
 	// 0x1 Deep-sleep; 0x2 Power-down
 	//LPC_PMU->PCON = 0x1; // Getting ~ 200uA in this mode
-	LPC_PMU->PCON = 0x2; // Getting ~ 60uA in this mode
+	LPC_PMU->PCON = 0x2; // Getting ~ 60uA in this mode with LPC810
 
 
 
 	  // Step 2: Select the power configuration in Power-down mode in the
 	  // PDSLEEPCFG (Table 35) register
-	  LPC_SYSCON->PDSLEEPCFG = ~1<<6; // WDT on during deep sleep/power down
+	  LPC_SYSCON->PDSLEEPCFG = ~(1<<3); // WDT on during deep sleep/power down
+	  //LPC_SYSCON->PDSLEEPCFG = ~((1<<6)|(1<<3)); // WDT+BOD on during deep sleep/power down
 
 
 	  // Step 3: Select the power configuration after wake-up in the
@@ -41,9 +65,6 @@ void prepareForPowerDown () {
 	  // Step 4: If any of the available wake-up interrupts are used for wake-up,
 	  // enable the interrupts in the interrupt wake-up registers
 	  // (Table 33, Table 34) and in the NVIC.
-	  // Needed?
-	  //NVIC_ClearPendingIRQ(WKT_IRQn);
-	  //NVIC_DisableIRQ(WKT_IRQn);
 	  NVIC_EnableIRQ(WKT_IRQn);
 
 
@@ -53,11 +74,22 @@ void prepareForPowerDown () {
 
 	  // STARTERP1: Start logic 1 interrupt wake-up enable register
 	  // Bit 15: 1 = enable self wake-up timer interrupt wake-up
-	  // Bit 3: 1 = enable self wake-up on UART interrupt
 	  // Ref UM10601 §4.6.29
 	  // hmm.. UART must be in synchronous slave mode:
 	  // http://docs.lpcware.com/lpc800um/RegisterMaps/uart/c-ConfiguretheUSARTforwake-up.html
-	  LPC_SYSCON->STARTERP1 = (1<<15)  | (1<<3);
+	  LPC_SYSCON->STARTERP1 = (1<<15);
+
+
+#ifdef FEATURE_UART_INTERRUPT
+	  LPC_SYSCON->STARTERP0 |= (1<<0); // PININT0 (UART RXD)
+#endif
+
+#ifdef FEATURE_EVENT_COUNTER
+	  // Also PINTINT0, PININT1, PININT2
+	  LPC_SYSCON->STARTERP0 |= (1<<1) // PININT1 (tip bucket)
+							//| (1<<2) // PININT2 (comparator output)
+							;
+#endif
 
 	  // DPDCTRL: Deep power-down control register
 	  // UM10601 §5.6.3 p47
@@ -76,8 +108,9 @@ void prepareForPowerDown () {
 	  // Reset WKT by writing 0, and then 1 to bit 9 of Peripheral reset control register
 	  // Ref UM10601, §4.6.2, p20.
 	  // TODO: is this necessary?
-	  LPC_SYSCON->PRESETCTRL &= ~(0x1 << 9);
-	  LPC_SYSCON->PRESETCTRL |= (0x1 << 9);
+	  //LPC_SYSCON->PRESETCTRL &= ~(0x1 << 9);
+	  //LPC_SYSCON->PRESETCTRL |= (0x1 << 9);
+	  lpc8xx_peripheral_reset(9);
 
 
 	  // Use WTK clock source 1 (10kHz, low power, low accuracy).
@@ -90,8 +123,4 @@ void prepareForPowerDown () {
 	  LPC_WKT->CTRL |= 0x01; // 10kHz LPOSC
 }
 
-void WKT_IRQHandler(void)
-{
-	LPC_WKT->CTRL |= 0x02;			/* clear interrupt flag */
-}
 
